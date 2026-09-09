@@ -1,0 +1,386 @@
+name: Build Windows EXE
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. Python 3.8
+      #    保留原本 MyTool 的相容性設定
+      # ============================================================
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.10'
+          architecture: x64
+
+      # ============================================================
+      # 3. 安裝原本需要的套件
+      #    不要求 requirements.txt / pyproject.toml
+      # ============================================================
+      - name: Install Dependencies
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller customtkinter pillow==9.5.0
+
+      # ============================================================
+      # 4. 顯示環境
+      # ============================================================
+      - name: Show Build Environment
+        shell: cmd
+        run: |
+          python --version
+          pip --version
+          pyinstaller --version
+          python -c "import PIL; print('Pillow', PIL.__version__)"
+
+      # ============================================================
+      # 5. 解壓原本的 MyTool.zip
+      # ============================================================
+      - name: Extract MyTool
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (!(Test-Path "MyTool.zip")) {
+            throw "MyTool.zip not found."
+          }
+
+          if (Test-Path "MyTool") {
+            Remove-Item "MyTool" -Recurse -Force
+          }
+
+          Expand-Archive -Path "MyTool.zip" -DestinationPath "." -Force
+
+          if (!(Test-Path "MyTool")) {
+            throw "MyTool folder was not created."
+          }
+
+          Write-Host "MyTool extracted successfully."
+
+      # ============================================================
+      # 6. 確認原本成功的檔案
+      # ============================================================
+      - name: Verify Source Files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if (!(Test-Path "MyTool\main.py")) {
+            throw "MyTool\main.py not found."
+          }
+
+          if (!(Test-Path "MyTool\MediaInfo.exe")) {
+            throw "MyTool\MediaInfo.exe not found."
+          }
+
+          if (!(Test-Path "MyTool\icons")) {
+            throw "MyTool\icons folder not found."
+          }
+
+          $iconFiles = Get-ChildItem `
+            -Path "MyTool\icons" `
+            -Filter "*.png" `
+            -File
+
+          if ($iconFiles.Count -lt 1) {
+            throw "No PNG icon files were found in MyTool\icons."
+          }
+
+          python -c "import PIL, PIL.Image, PIL.ImageTk; print('Pillow import: OK', PIL.__version__)"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pillow/PIL is not available in the Python 3.8 build environment."
+          }
+
+          Write-Host "main.py: OK"
+          Write-Host "MediaInfo.exe: OK"
+          Write-Host "icons: $($iconFiles.Count) PNG file(s) OK"
+
+      # ============================================================
+      # 7. 從你提供的 Transfer.it Link 下載 FFmpeg 4.4.1
+      #
+      # 不上傳 FFmpeg 到 GitHub。
+      # Actions 建置時才下載。
+      # ============================================================
+      - name: Set up Python 3.11 for Transfer.it
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+
+      - name: Download FFmpeg 4.4.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $ffmpegUrl = "https://transfer.it/t/TKR2Rmh30DjZ"
+          $download = "$env:RUNNER_TEMP\transferit-ffmpeg"
+          $extract = "$env:RUNNER_TEMP\ffmpeg-4.4.1"
+
+          Write-Host "=========================================="
+          Write-Host "Downloading FFmpeg 4.4.1"
+          Write-Host "=========================================="
+          Write-Host $ffmpegUrl
+
+          if (Test-Path $download) {
+            Remove-Item $download -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $download -Force | Out-Null
+
+          python -m pip install --disable-pip-version-check "transferit-py"
+          if ($LASTEXITCODE -ne 0) {
+            throw "transferit-py installation failed."
+          }
+
+          @'
+          from transferit import Transferit
+          with Transferit() as tx:
+              tx.download("https://transfer.it/t/TKR2Rmh30DjZ", r"__DOWNLOAD_DIR__")
+          '@.Replace('__DOWNLOAD_DIR__', ($download -replace '\\', '\\')) | python -
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Transfer.it download failed."
+          }
+
+          $archive = Get-ChildItem `
+            -Path $download `
+            -Filter "*.7z" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $archive) {
+            throw "Downloaded FFmpeg archive was not found."
+          }
+
+          $size = $archive.Length
+          Write-Host "Downloaded size: $size bytes"
+
+          if ($size -lt 1000000) {
+            throw "Downloaded FFmpeg archive is unexpectedly small."
+          }
+
+          if (Test-Path $extract) {
+            Remove-Item $extract -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+
+          Write-Host "Extracting with 7-Zip..."
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+          }
+
+          if (!(Test-Path $sevenZip)) {
+            throw "7-Zip was not found on the GitHub runner."
+          }
+
+          & $sevenZip x $archive.FullName "-o$extract" -y
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip extraction failed. Exit code: $LASTEXITCODE"
+          }
+
+          $ffmpeg = Get-ChildItem `
+            -Path $extract `
+            -Filter "ffmpeg.exe" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $ffmpeg) {
+            Write-Host "Archive contents:"
+            Get-ChildItem $extract -Recurse -File |
+              Select-Object FullName
+
+            throw "ffmpeg.exe was not found inside the archive."
+          }
+
+          Copy-Item `
+            $ffmpeg.FullName `
+            "MyTool\ffmpeg.exe" `
+            -Force
+
+          Write-Host "FFmpeg copied to MyTool\ffmpeg.exe"
+
+      - name: Restore Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.10'
+          architecture: x64
+
+      # ============================================================
+      # 8. 驗證 FFmpeg
+      # ============================================================
+      - name: Verify FFmpeg
+        shell: cmd
+        working-directory: MyTool
+        run: |
+          if not exist "ffmpeg.exe" (
+            echo ERROR: ffmpeg.exe not found
+            exit /b 1
+          )
+
+          echo ==========================================
+          echo FFmpeg version
+          echo ==========================================
+          ffmpeg.exe -version
+
+          if errorlevel 1 (
+            echo ERROR: FFmpeg failed to start
+            exit /b 1
+          )
+
+      # ============================================================
+      # 9. Build EXE
+      #
+      # 保留原本：
+      # --noconfirm
+      # --onedir
+      # --windowed
+      # MediaInfo.exe
+      #
+      # 新增：
+      # FFmpeg 4.4.1
+      # icons PNG 資料夾
+      # ============================================================
+      - name: Build EXE
+        shell: cmd
+        working-directory: MyTool
+        run: |
+          pyinstaller ^
+            --noconfirm ^
+            --clean ^
+            --onedir ^
+            --windowed ^
+            --name "MediaField QC" ^
+            --add-binary "MediaInfo.exe;." ^
+            --add-binary "ffmpeg.exe;." ^
+            --add-data "icons;icons" ^
+            --collect-submodules PIL ^
+            main.py
+
+          if errorlevel 1 (
+            echo ERROR: PyInstaller build failed
+            exit /b 1
+          )
+
+      # ============================================================
+      # 10. 驗證最終 EXE
+      # ============================================================
+      - name: Verify Final Package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $app = "MyTool\dist\MediaField QC"
+          $exe = "$app\MediaField QC.exe"
+
+          if (!(Test-Path $exe)) {
+            throw "MediaField QC.exe was not created."
+          }
+
+          $ffmpeg = Get-ChildItem `
+            -Path $app `
+            -Filter "ffmpeg.exe" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $ffmpeg) {
+            throw "Bundled ffmpeg.exe was not found."
+          }
+
+          $mediaInfo = Get-ChildItem `
+            -Path $app `
+            -Filter "MediaInfo.exe" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $mediaInfo) {
+            throw "Bundled MediaInfo.exe was not found."
+          }
+
+          $iconsDir = Get-ChildItem `
+            -Path $app `
+            -Directory `
+            -Filter "icons" `
+            -Recurse |
+            Select-Object -First 1
+
+          if ($null -eq $iconsDir) {
+            throw "Bundled icons folder was not found."
+          }
+
+          $bundledIcons = Get-ChildItem `
+            -Path $iconsDir.FullName `
+            -Filter "*.png" `
+            -File
+
+          if ($bundledIcons.Count -lt 1) {
+            throw "Bundled icons folder contains no PNG files."
+          }
+
+          Write-Host "=========================================="
+          Write-Host "FINAL PACKAGE VERIFIED"
+          Write-Host "=========================================="
+          Write-Host "EXE:      $exe"
+          Write-Host "FFmpeg:  $($ffmpeg.FullName)"
+          Write-Host "MediaInfo: $($mediaInfo.FullName)"
+          Write-Host "Icons:    $($iconsDir.FullName) ($($bundledIcons.Count) PNG file(s))"
+
+          Write-Host ""
+          Write-Host "Package contents:"
+          Get-ChildItem $app -Recurse -File |
+            Select-Object FullName, Length
+
+      # ============================================================
+      # 11. 打包成 ZIP
+      # ============================================================
+      - name: Package Release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $app = "MyTool\dist\MediaField QC"
+          $zip = "MediaField QC.zip"
+
+          if (Test-Path $zip) {
+            Remove-Item $zip -Force
+          }
+
+          Compress-Archive `
+            -Path "$app\*" `
+            -DestinationPath $zip `
+            -CompressionLevel Optimal `
+            -Force
+
+          Write-Host "Created $zip"
+          Get-Item $zip | Select-Object Name, Length
+
+      # ============================================================
+      # 12. Upload Artifact
+      # ============================================================
+      - name: Upload Release Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaField QC
+          path: MediaField QC.zip
+          if-no-files-found: error
+          retention-days: 1
