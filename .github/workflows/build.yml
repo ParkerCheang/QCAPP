@@ -109,71 +109,58 @@ jobs:
           Write-Host "icons: $($iconFiles.Count) PNG file(s) OK"
 
       # ============================================================
-      # 7. 從你提供的 Transfer.it Link 下載 FFmpeg 4.4.1
+      # 7. 從 Google Drive 下載 FFmpeg 4.4.1 Full Build
+      #
+      # Google Drive:
+      # https://drive.google.com/file/d/1u4iuUFQsEEoAJiuO8D1qEmOFibmGZ4r9/view?usp=drive_link
       #
       # 不上傳 FFmpeg 到 GitHub。
-      # Actions 建置時才下載。
+      # Actions 建置時才下載，並同時取出：
+      #   ffmpeg.exe
+      #   ffprobe.exe
       # ============================================================
-      - name: Set up Python 3.11 for Transfer.it
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          architecture: x64
-
-      - name: Download FFmpeg 4.4.1
+      - name: Download FFmpeg 4.4.1 Full Build from Google Drive
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          $ffmpegUrl = "https://transfer.it/t/TKR2Rmh30DjZ"
-          $download = "$env:RUNNER_TEMP\transferit-ffmpeg"
-          $extract = "$env:RUNNER_TEMP\ffmpeg-4.4.1"
+          $driveFileId = "1u4iuUFQsEEoAJiuO8D1qEmOFibmGZ4r9"
+          $archive = "$env:RUNNER_TEMP\ffmpeg-4.4.1-full_build.7z"
+          $extract = "$env:RUNNER_TEMP\ffmpeg-4.4.1-full_build"
 
           Write-Host "=========================================="
-          Write-Host "Downloading FFmpeg 4.4.1"
+          Write-Host "Downloading FFmpeg 4.4.1 Full Build"
+          Write-Host "Google Drive file ID: $driveFileId"
           Write-Host "=========================================="
-          Write-Host $ffmpegUrl
 
-          if (Test-Path $download) {
-            Remove-Item $download -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $download -Force | Out-Null
-
-          python -m pip install --disable-pip-version-check "transferit-py"
-          if ($LASTEXITCODE -ne 0) {
-            throw "transferit-py installation failed."
-          }
-
-          @'
-          from transferit import Transferit
-          with Transferit() as tx:
-              tx.download("https://transfer.it/t/TKR2Rmh30DjZ", r"__DOWNLOAD_DIR__")
-          '@.Replace('__DOWNLOAD_DIR__', ($download -replace '\\', '\\')) | python -
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Transfer.it download failed."
-          }
-
-          $archive = Get-ChildItem `
-            -Path $download `
-            -Filter "*.7z" `
-            -Recurse `
-            -File |
-            Select-Object -First 1
-
-          if ($null -eq $archive) {
-            throw "Downloaded FFmpeg archive was not found."
-          }
-
-          $size = $archive.Length
-          Write-Host "Downloaded size: $size bytes"
-
-          if ($size -lt 1000000) {
-            throw "Downloaded FFmpeg archive is unexpectedly small."
+          if (Test-Path $archive) {
+            Remove-Item $archive -Force
           }
 
           if (Test-Path $extract) {
             Remove-Item $extract -Recurse -Force
+          }
+
+          # 使用 gdown 處理 Google Drive 的確認頁 / 大檔下載。
+          python -m pip install --disable-pip-version-check --upgrade gdown
+          if ($LASTEXITCODE -ne 0) {
+            throw "gdown installation failed."
+          }
+
+          python -m gdown "https://drive.google.com/uc?id=$driveFileId" -O "$archive"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Google Drive download failed."
+          }
+
+          if (!(Test-Path $archive)) {
+            throw "Downloaded FFmpeg archive was not created."
+          }
+
+          $size = (Get-Item $archive).Length
+          Write-Host "Downloaded size: $size bytes"
+
+          if ($size -lt 1000000) {
+            throw "Downloaded FFmpeg archive is unexpectedly small."
           }
 
           New-Item -ItemType Directory -Path $extract -Force | Out-Null
@@ -190,7 +177,7 @@ jobs:
             throw "7-Zip was not found on the GitHub runner."
           }
 
-          & $sevenZip x $archive.FullName "-o$extract" -y
+          & $sevenZip x $archive "-o$extract" -y
 
           if ($LASTEXITCODE -ne 0) {
             throw "7-Zip extraction failed. Exit code: $LASTEXITCODE"
@@ -203,12 +190,25 @@ jobs:
             -File |
             Select-Object -First 1
 
-          if ($null -eq $ffmpeg) {
+          $ffprobe = Get-ChildItem `
+            -Path $extract `
+            -Filter "ffprobe.exe" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $ffmpeg -or $null -eq $ffprobe) {
             Write-Host "Archive contents:"
             Get-ChildItem $extract -Recurse -File |
-              Select-Object FullName
+              Select-Object FullName, Length
 
-            throw "ffmpeg.exe was not found inside the archive."
+            if ($null -eq $ffmpeg) {
+              throw "ffmpeg.exe was not found inside the archive."
+            }
+
+            if ($null -eq $ffprobe) {
+              throw "ffprobe.exe was not found inside the archive."
+            }
           }
 
           Copy-Item `
@@ -216,7 +216,13 @@ jobs:
             "MyTool\ffmpeg.exe" `
             -Force
 
+          Copy-Item `
+            $ffprobe.FullName `
+            "MyTool\ffprobe.exe" `
+            -Force
+
           Write-Host "FFmpeg copied to MyTool\ffmpeg.exe"
+          Write-Host "FFprobe copied to MyTool\ffprobe.exe"
 
       - name: Restore Python 3.8
         uses: actions/setup-python@v5
@@ -225,14 +231,19 @@ jobs:
           architecture: x64
 
       # ============================================================
-      # 8. 驗證 FFmpeg
+      # 8. 驗證 FFmpeg / FFprobe
       # ============================================================
-      - name: Verify FFmpeg
+      - name: Verify FFmpeg and FFprobe
         shell: cmd
         working-directory: MyTool
         run: |
           if not exist "ffmpeg.exe" (
             echo ERROR: ffmpeg.exe not found
+            exit /b 1
+          )
+
+          if not exist "ffprobe.exe" (
+            echo ERROR: ffprobe.exe not found
             exit /b 1
           )
 
@@ -243,6 +254,16 @@ jobs:
 
           if errorlevel 1 (
             echo ERROR: FFmpeg failed to start
+            exit /b 1
+          )
+
+          echo ==========================================
+          echo FFprobe version
+          echo ==========================================
+          ffprobe.exe -version
+
+          if errorlevel 1 (
+            echo ERROR: FFprobe failed to start
             exit /b 1
           )
 
@@ -257,6 +278,7 @@ jobs:
       #
       # 新增：
       # FFmpeg 4.4.1
+      # FFprobe 4.4.1
       # icons PNG 資料夾
       # ============================================================
       - name: Build EXE
@@ -271,6 +293,7 @@ jobs:
             --name "MediaField QC" ^
             --add-binary "MediaInfo.exe;." ^
             --add-binary "ffmpeg.exe;." ^
+            --add-binary "ffprobe.exe;." ^
             --add-data "icons;icons" ^
             --collect-submodules PIL ^
             main.py
@@ -304,6 +327,17 @@ jobs:
 
           if ($null -eq $ffmpeg) {
             throw "Bundled ffmpeg.exe was not found."
+          }
+
+          $ffprobe = Get-ChildItem `
+            -Path $app `
+            -Filter "ffprobe.exe" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if ($null -eq $ffprobe) {
+            throw "Bundled ffprobe.exe was not found."
           }
 
           $mediaInfo = Get-ChildItem `
@@ -341,7 +375,8 @@ jobs:
           Write-Host "FINAL PACKAGE VERIFIED"
           Write-Host "=========================================="
           Write-Host "EXE:      $exe"
-          Write-Host "FFmpeg:  $($ffmpeg.FullName)"
+          Write-Host "FFmpeg:   $($ffmpeg.FullName)"
+          Write-Host "FFprobe:  $($ffprobe.FullName)"
           Write-Host "MediaInfo: $($mediaInfo.FullName)"
           Write-Host "Icons:    $($iconsDir.FullName) ($($bundledIcons.Count) PNG file(s))"
 
