@@ -231,7 +231,59 @@ jobs:
           architecture: x64
 
       # ============================================================
-      # 8. 驗證 FFmpeg / FFprobe
+      # 8. 從使用者自己的 Google Drive 下載 NumPy 1.24.4 wheel
+      #
+      # Google Drive:
+      # https://drive.google.com/file/d/1H64fOfV2FLY-swASx343LgyreW7VS0e1/view?usp=sharing
+      #
+      # 用於訊號完整性模組的精確 PCM 向量化加速。
+      # 只改變運算方式，不抽樣、不跳 sample。
+      # ============================================================
+      - name: Install NumPy 1.24.4 from Google Drive
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $driveFileId = "1H64fOfV2FLY-swASx343LgyreW7VS0e1"
+          $wheel = "$env:RUNNER_TEMP\numpy-1.24.4-cp38-cp38-win_amd64.whl"
+
+          if (Test-Path $wheel) {
+            Remove-Item $wheel -Force
+          }
+
+          # 沿用原本 Google Drive / gdown 下載機制；不從其他網站下載 NumPy wheel。
+          python -m pip install --disable-pip-version-check --upgrade gdown
+          if ($LASTEXITCODE -ne 0) {
+            throw "gdown installation failed before NumPy download."
+          }
+
+          python -m gdown "https://drive.google.com/uc?id=$driveFileId" -O "$wheel"
+          if ($LASTEXITCODE -ne 0) {
+            throw "NumPy wheel download from Google Drive failed."
+          }
+
+          if (!(Test-Path $wheel)) {
+            throw "Downloaded NumPy wheel was not created."
+          }
+
+          $size = (Get-Item $wheel).Length
+          Write-Host "Downloaded NumPy wheel size: $size bytes"
+          if ($size -lt 1000000) {
+            throw "Downloaded NumPy wheel is unexpectedly small."
+          }
+
+          python -m pip install --no-index --force-reinstall "$wheel"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Local NumPy wheel installation failed."
+          }
+
+          python -c "import numpy as np; assert np.__version__ == '1.24.4'; print('NumPy', np.__version__, 'OK')"
+          if ($LASTEXITCODE -ne 0) {
+            throw "NumPy 1.24.4 verification failed."
+          }
+
+      # ============================================================
+      # 9. 驗證 FFmpeg / FFprobe
       # ============================================================
       - name: Verify FFmpeg and FFprobe
         shell: cmd
@@ -268,7 +320,7 @@ jobs:
           )
 
       # ============================================================
-      # 9. Build EXE
+      # 10. Build EXE
       #
       # 保留原本：
       # --noconfirm
@@ -285,6 +337,12 @@ jobs:
         shell: cmd
         working-directory: MyTool
         run: |
+          python -c "import numpy as np; print('Bundling NumPy', np.__version__)"
+          if errorlevel 1 (
+            echo ERROR: NumPy is not available in the Python 3.8 build environment
+            exit /b 1
+          )
+
           pyinstaller ^
             --noconfirm ^
             --clean ^
@@ -304,7 +362,7 @@ jobs:
           )
 
       # ============================================================
-      # 10. 驗證最終 EXE
+      # 11. 驗證最終 EXE
       # ============================================================
       - name: Verify Final Package
         shell: powershell
@@ -386,7 +444,7 @@ jobs:
             Select-Object FullName, Length
 
       # ============================================================
-      # 11. 打包成 ZIP
+      # 12. 打包成 ZIP
       # ============================================================
       - name: Package Release
         shell: powershell
@@ -410,7 +468,7 @@ jobs:
           Get-Item $zip | Select-Object Name, Length
 
       # ============================================================
-      # 12. Upload Artifact
+      # 13. Upload Artifact
       # ============================================================
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
